@@ -1,0 +1,222 @@
+{
+  "name": "Task 8 - Wazuh Agentic AI Triage",
+  "nodes": [
+    {
+      "parameters": {
+        "jsCode": "// Handle both array-wrapped and direct object payloads\nconst input = $input.item.json;\nconst raw = Array.isArray(input) ? input[0] : input;\nconst alert = raw._source || raw.body || raw;\n\nreturn {\n  json: {\n    timestamp: alert.timestamp || new Date().toISOString(),\n    rule_id: alert.rule?.id || \"unknown\",\n    rule_level: alert.rule?.level || 0,\n    rule_description: alert.rule?.description || \"No description provided\",\n    mitre_id: alert.rule?.mitre?.id?.join(\", \") || \"N/A\",\n    mitre_tactic: alert.rule?.mitre?.tactic?.join(\", \") || \"N/A\",\n    mitre_technique: alert.rule?.mitre?.technique?.join(\", \") || \"N/A\",\n    agent_name: alert.agent?.name || \"unknown\",\n    agent_id: alert.agent?.id || \"unknown\",\n    agent_ip: alert.agent?.ip || \"N/A\",\n    src_ip: alert.data?.srcip || alert.data?.src_ip || alert.agent?.ip || \"N/A\",\n    dst_ip: alert.data?.dstip || alert.data?.dst_ip || \"N/A\",\n    dst_user: alert.data?.osquery?.decorations?.username || alert.data?.dstuser || \"N/A\",\n    url: alert.data?.osquery?.columns?.url || \"N/A\",\n    full_log: alert.full_log || \"N/A\"\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        0
+      ],
+      "id": "487c28b8-1d93-4586-bfb3-a3609b64904d",
+      "name": "Normalize the alert"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "agentic-alert",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "287c57e0-840b-43f6-88a5-892787d989c7",
+      "name": "Get alert",
+      "webhookId": "9bfbb817-efc6-4d2c-b295-9146c25fd7a4"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "{ \"Content-Type\": \"application/json\", \"Authorization\": \"Bearer <GROQ_API_KEY>\" }",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  model: \"openai/gpt-oss-120b\",\n  messages: [\n    {\n      role: \"system\",\n      content: \"You are a SOC Tier-2 analyst AI. You will receive a Wazuh security alert as JSON. Analyze it and respond ONLY with valid JSON, no markdown fences, no commentary, using exactly this schema: {\\\"alert_summary\\\": string, \\\"classification\\\": \\\"True Positive\\\" or \\\"False Positive\\\", \\\"confidence_score\\\": number (0-100), \\\"ioc_analysis\\\": {\\\"source_ip\\\": string, \\\"destination_ip\\\": string, \\\"indicators\\\": [string]}, \\\"mitre_attack\\\": {\\\"tactic\\\": string, \\\"technique_id\\\": string, \\\"technique_name\\\": string}, \\\"immediate_actions\\\": [string], \\\"security_recommendations\\\": [string]}\"\n    },\n    {\n      role: \"user\",\n      content: JSON.stringify($json)\n    }\n  ],\n  temperature: 0.2\n}) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        448,
+        0
+      ],
+      "id": "87985c49-a929-4bb8-ac86-9b7043ce7aee",
+      "name": "Call LLM for Description"
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $json;\n\n// Groq wraps response in choices[0].message.content\nconst raw = response.choices[0].message.content;\n\n// Strip markdown fences just in case\nconst cleaned = raw.replace(/```json|```/g, \"\").trim();\n\nlet report;\ntry {\n  report = JSON.parse(cleaned);\n} catch (e) {\n  report = {\n    alert_summary: \"AI response could not be parsed\",\n    classification: \"Unknown\",\n    confidence_score: 0,\n    ioc_analysis: {},\n    mitre_attack: {},\n    immediate_actions: [],\n    security_recommendations: [],\n    raw_error: raw\n  };\n}\n\n// Pull the original normalized alert back in (reference your normalize node by its actual name)\nconst originalAlert = $('Normalize the alert').item.json;\n\nreturn {\n  json: {\n    ...originalAlert,\n    ai_report: report\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        672,
+        0
+      ],
+      "id": "66df5514-9698-4f23-976b-5c94d2e3c14b",
+      "name": "Normalize response based on previous alert"
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $json;\n\n// Convert to IRIS-friendly format: YYYY-MM-DD HH:MM:SS\nconst dt = new Date(item.timestamp);\nconst formatted = dt.toISOString().slice(0, 19).replace('T', ' ');\n\nreturn {\n  json: {\n    ...item,\n    alert_source_event_time: formatted\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        896,
+        0
+      ],
+      "id": "5f785bbd-d1d0-43df-978f-33e0d929c674",
+      "name": "fix datetime stamp for IRIS"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://10.98.60.251/alerts/add",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "{ \"Content-Type\": \"application/json\", \"Authorization\": \"Bearer <IRIS_KEY>\" }",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"alert_title\": \"{{ $json.rule_description }}\",\n  \"alert_description\": \"Detected on {{ $json.agent_name }} ({{ $json.agent_ip }}) - {{ $json.ai_report.alert_summary }} - MITRE: {{ $json.mitre_technique }} ({{ $json.mitre_id }})\",\n  \"alert_source\": \"Wazuh\",\n  \"alert_severity_id\": {{ $json.rule_level >= 15 ? 6 : ($json.rule_level >= 12 ? 5 : 1) }},\n  \"alert_status_id\": 2,\n  \"alert_source_event_time\": \"{{ $json.alert_source_event_time }}\",\n  \"alert_customer_id\": 1\n}",
+        "options": {
+          "allowUnauthorizedCerts": true
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1136,
+        0
+      ],
+      "id": "59155460-9211-493b-b12c-944402718e76",
+      "name": "Create a case in IRIS DFIR",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "ChEpfnR5AvKJ4dIT",
+          "name": "Header Auth account"
+        }
+      }
+    }
+  ],
+  "pinData": {
+    "Get alert": [
+      {
+        "json": {
+          "timestamp": "2026-08-21T14:32:00.000+0000",
+          "rule": {
+            "id": "5710",
+            "level": 13,
+            "description": "Multiple authentication failures followed by successful login",
+            "groups": [
+              "authentication_failed",
+              "authentication_success"
+            ],
+            "mitre": {
+              "id": [
+                "T1110"
+              ],
+              "tactic": [
+                "Credential Access"
+              ],
+              "technique": [
+                "Brute Force"
+              ]
+            }
+          },
+          "agent": {
+            "id": "001",
+            "name": "SUIII",
+            "ip": "192.168.56.1"
+          },
+          "data": {
+            "srcip": "185.220.101.47",
+            "dstuser": "root"
+          },
+          "full_log": "sshd: 8 failed password attempts for root from 185.220.101.47, followed by successful login at 2026-08-21T14:32:00Z"
+        }
+      }
+    ]
+  },
+  "connections": {
+    "Normalize the alert": {
+      "main": [
+        [
+          {
+            "node": "Call LLM for Description",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get alert": {
+      "main": [
+        [
+          {
+            "node": "Normalize the alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call LLM for Description": {
+      "main": [
+        [
+          {
+            "node": "Normalize response based on previous alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize response based on previous alert": {
+      "main": [
+        [
+          {
+            "node": "fix datetime stamp for IRIS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "fix datetime stamp for IRIS": {
+      "main": [
+        [
+          {
+            "node": "Create a case in IRIS DFIR",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "f9f1b93c-2b82-4230-a21b-06bed6714b8a",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "e2fe26a7784ddf86d500dbb91f959330b0cf8ed13712991752eb72934e4e232d"
+  },
+  "nodeGroups": [],
+  "id": "LfgJ13WPz80LU9wm",
+  "tags": []
+}

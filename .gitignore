@@ -1,0 +1,21 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+
+# n8n
+.n8n/
+n8n_data/
+
+# Secrets - never commit real credentials or API keys
+*.env
+.env
+*secret*
+*credential*
+
+# Temp
+*.tmp
+*.log
